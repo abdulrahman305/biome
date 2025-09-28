@@ -5,7 +5,8 @@ use crate::suppression_action::JsSuppressionAction;
 use biome_analyze::{
     AnalysisFilter, Analyzer, AnalyzerContext, AnalyzerOptions, AnalyzerPluginSlice,
     AnalyzerSignal, AnalyzerSuppression, ControlFlow, InspectMatcher, LanguageRoot,
-    MatchQueryParams, MetadataRegistry, RuleAction, RuleRegistry, to_analyzer_suppressions,
+    MatchQueryParams, MetadataRegistry, Phases, PluginTargetLanguage, PluginVisitor, RuleAction,
+    RuleRegistry, to_analyzer_suppressions,
 };
 use biome_aria::AriaRoles;
 use biome_diagnostics::Error as DiagnosticError;
@@ -20,7 +21,6 @@ use std::sync::{Arc, LazyLock};
 mod a11y;
 pub mod assist;
 mod ast_utils;
-mod class_member_references;
 mod frameworks;
 pub mod globals;
 pub mod lint;
@@ -136,14 +136,20 @@ where
         &mut emit_signal,
     );
 
-    for plugin in plugins {
-        if plugin.supports_js() {
-            analyzer.add_plugin(plugin.clone());
-        }
-    }
-
     for ((phase, _), visitor) in visitors {
         analyzer.add_visitor(phase, visitor);
+    }
+
+    for plugin in plugins {
+        // SAFETY: The plugin target language is correctly checked here.
+        unsafe {
+            if plugin.language() == PluginTargetLanguage::JavaScript {
+                analyzer.add_visitor(
+                    Phases::Syntax,
+                    Box::new(PluginVisitor::new_unchecked(plugin.clone())),
+                )
+            }
+        }
     }
 
     let file_path = options.file_path.clone();
