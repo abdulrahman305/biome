@@ -251,10 +251,11 @@ pub trait Parser: Sized {
         assert_eq!(
             kind,
             self.cur(),
-            "expected {:?} but at {:?} -- text: \"{}\"",
+            "expected {:?} but at {:?} -- text: \"{}\" at {:?}",
             kind,
             self.cur(),
             self.cur_text(),
+            self.source().current_range(),
         );
 
         self.do_bump(kind)
@@ -264,10 +265,11 @@ pub trait Parser: Sized {
     fn bump_ts(&mut self, kinds: TokenSet<Self::Kind>) {
         assert!(
             kinds.contains(self.cur()),
-            "expected {:?} but at {:?} -- text: \"{}\"",
+            "expected {:?} but at {:?} -- text: \"{}\" at {:?}",
             kinds,
             self.cur(),
             self.cur_text(),
+            self.source().current_range(),
         );
 
         self.bump_any()
@@ -330,10 +332,11 @@ pub trait Parser: Sized {
         assert_eq!(
             kind,
             self.cur(),
-            "expected {:?} but at {:?} -- text: \"{}\"",
+            "expected {:?} but at {:?} -- text: \"{}\" at {:?}",
             kind,
             self.cur(),
             self.cur_text(),
+            self.source().current_range(),
         );
 
         self.do_bump_with_context(kind, context);
@@ -388,6 +391,8 @@ pub trait Parser: Sized {
     }
 
     /// Consume the next token if `kind` matches.
+    ///
+    /// Returns `true` if the token was consumed, `false` otherwise.
     fn eat(&mut self, kind: Self::Kind) -> bool {
         if !self.at(kind) {
             return false;
@@ -399,6 +404,8 @@ pub trait Parser: Sized {
     }
 
     /// Consume the next token if token set matches.
+    ///
+    /// Returns `true` if the token was consumed, `false` otherwise.
     fn eat_ts(&mut self, kinds: TokenSet<Self::Kind>) -> bool {
         if !self.at_ts(kinds) {
             return false;
@@ -410,6 +417,8 @@ pub trait Parser: Sized {
     }
 
     /// Consume the next token if token set matches using the specified `context.
+    ///
+    /// Returns `true` if the token was consumed, `false` otherwise.
     fn eat_ts_with_context(
         &mut self,
         kinds: TokenSet<Self::Kind>,

@@ -31,29 +31,21 @@ use biome_service::workspace::DocumentFileSource;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 
 #[derive(Debug)]
-struct Errors(String);
-
+struct Errors {
+    message: String,
+}
 impl Errors {
-    fn style_rule_error(rule_name: impl Display) -> Self {
-        Self(format!(
-            "The rule '{rule_name}' that belongs to the group 'style' can't have Severity::Error. Lower down the severity or change the group.",
-        ))
-    }
-
-    fn action_error(rule_name: impl Display) -> Self {
-        Self(format!(
-            "The rule '{rule_name}' is an action, and it must have Severity::Information. Lower down the severity.",
-        ))
+    const fn new(message: String) -> Self {
+        Self { message }
     }
 }
-
+impl std::error::Error for Errors {}
 impl Display for Errors {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0.as_str())
+        let Self { message } = self;
+        f.write_str(message)
     }
 }
-
-impl std::error::Error for Errors {}
 
 type Data = BTreeMap<&'static str, (RuleMetadata, RuleCategory)>;
 pub fn check_rules() -> anyhow::Result<()> {
@@ -72,12 +64,75 @@ pub fn check_rules() -> anyhow::Result<()> {
             if !matches!(category, RuleCategory::Lint | RuleCategory::Action) {
                 return;
             }
-            if R::Group::NAME == "style" && R::METADATA.severity == Severity::Error {
-                self.errors.push(Errors::style_rule_error(R::METADATA.name))
-            } else if <R::Group as RuleGroup>::Category::CATEGORY == RuleCategory::Action
-                && R::METADATA.severity != Severity::Information
+            let group = R::Group::NAME;
+            let rule_name = R::METADATA.name;
+            let rule_severity = R::METADATA.severity;
+            if matches!(group, "a11y" | "correctness" | "security")
+                && rule_severity != Severity::Error
+                && !matches!(
+                    rule_name,
+                    // TODO: remove these exceptions in Biome 3.0
+                    "noNodejsModules"
+                        | "noPrivateImports"
+                        | "noUnusedFunctionParameters"
+                        | "noUnusedImports"
+                        | "noUnusedLabels"
+                        | "noUnusedPrivateClassMembers"
+                        | "noUnusedVariables"
+                        | "useImportExtensions"
+                        | "noNoninteractiveElementInteractions"
+                        | "noGlobalDirnameFilename"
+                        | "noProcessGlobal"
+                        | "noReactPropAssignments"
+                        | "noRestrictedElements"
+                        | "noSecrets"
+                        | "noSolidDestructuredProps"
+                        | "useJsonImportAttributes"
+                        | "useParseIntRadix"
+                        | "useSingleJsDocAsterisk"
+                )
             {
-                self.errors.push(Errors::action_error(R::METADATA.name));
+                self.errors.push(Errors::new(format!(
+                    "The rule '{rule_name}' belongs to the group '{group}' and has a severity set to '{rule_severity}'. Rules that belong to the group {group} must have a severity set to 'error'. Set the severity to 'error' or change the group of the rule."
+                )));
+            } else if matches!(group, "complexity" | "style") && rule_severity == Severity::Error {
+                self.errors.push(Errors::new(format!(
+                    "The rule '{rule_name}' belongs to the group '{group}' and has a severity set to '{rule_severity}'. Rules that belong to the group '{group}' must not have a severity set to 'error'. Lower down the severity or change the group of the rule."
+                )));
+            } else if group == "performance"
+                && rule_severity != Severity::Warning
+                && !matches!(
+                    rule_name,
+                    // TODO: remove these exceptions in Biome 3.0
+                    "noAwaitInLoops" | "useGoogleFontPreconnect" | "useSolidForComponent"
+                )
+            {
+                self.errors.push(Errors::new(format!(
+                    "The rule '{rule_name}' belongs to the group '{group}' and has a severity set to '{rule_severity}'. Rules that belong to the group '{group}' must have a severity set to 'warn'. Set the severity to 'warn' or change the group of the rule."
+                )));
+            } else if group == "suspicious"
+                && rule_severity == Severity::Information
+                && !matches!(
+                    rule_name,
+                    // TODO: remove these exceptions in Biome 3.0
+                    "noAlert"
+                        | "noBitwiseOperators"
+                        | "noConstantBinaryExpressions"
+                        | "noUnassignedVariables"
+                        | "useStaticResponseMethods"
+                        | "noQuickfixBiome"
+                        | "noDuplicateFields"
+                )
+            {
+                self.errors.push(Errors::new(format!(
+                    "The rule '{rule_name}' belongs to the group '{group}' and has a severity set to '{rule_severity}'. Rules that belong to the group '{group}' must have a severity set to 'warn' or 'error'. Change the severity or change the group of the rule."
+                )));
+            } else if <R::Group as RuleGroup>::Category::CATEGORY == RuleCategory::Action
+                && rule_severity != Severity::Information
+            {
+                self.errors.push(Errors::new(format!(
+                    "The action '{rule_name}' has a severity set to '{rule_severity}'. Actions must have a severity set to 'info'. Set the severity of the rule to 'info'."
+                )));
             } else {
                 self.groups
                     .entry((<R::Group as RuleGroup>::NAME, R::METADATA.language))
@@ -213,6 +268,7 @@ impl DiagnosticWriter {
 fn assert_lint(
     group: &'static str,
     rule: &'static str,
+    rule_language: &'static str,
     test: &CodeBlock,
     code: &str,
     config: Option<Configuration>,
@@ -226,11 +282,20 @@ fn assert_lint(
     // what was emitted matches the expectations set for this code block.
     let mut diagnostics = DiagnosticWriter::default();
 
-    match test.document_file_source() {
+    let document_file_source = if rule_language == "html" {
+        // HACK: Force HTML analysis for rules that come from the HTML analyzer
+        DocumentFileSource::Html(
+            biome_html_syntax::HtmlFileSource::try_from_extension(&test.tag)
+                .unwrap_or_else(|_| biome_html_syntax::HtmlFileSource::html()),
+        )
+    } else {
+        test.document_file_source()
+    };
+    match document_file_source {
         DocumentFileSource::Js(file_source) => {
             // Temporary support for astro, svelte and vue code blocks
             let (code, file_source) = match file_source.as_embedding_kind() {
-                EmbeddingKind::Astro => (
+                EmbeddingKind::Astro { .. } => (
                     biome_service::file_handlers::AstroFileHandler::input(code),
                     JsFileSource::ts(),
                 ),
@@ -690,7 +755,7 @@ fn parse_documentation(
 ) -> anyhow::Result<()> {
     let parser = Parser::new(rule_metadata.docs);
 
-    let mut test_runner = TestRunner::new(group, rule_metadata.name);
+    let mut test_runner = TestRunner::new(group, rule_metadata.name, rule_metadata.language);
 
     // Track the last configuration options block that was encountered
     let mut last_options: Option<Configuration> = None;
@@ -772,6 +837,7 @@ struct PendingTest {
 struct TestRunner {
     group: &'static str,
     rule_name: &'static str,
+    rule_language: &'static str,
 
     /// Code block tests for the current documentation section.
     /// Tests are deferred and run as a batch when the section ends.
@@ -785,10 +851,11 @@ struct TestRunner {
 }
 
 impl TestRunner {
-    pub fn new(group: &'static str, rule_name: &'static str) -> Self {
+    pub fn new(group: &'static str, rule_name: &'static str, rule_language: &'static str) -> Self {
         Self {
             group,
             rule_name,
+            rule_language,
             pending_tests: Vec::new(),
             file_system: HashMap::new(),
         }
@@ -805,6 +872,7 @@ impl TestRunner {
             assert_lint(
                 self.group,
                 self.rule_name,
+                self.rule_language,
                 &test.test,
                 &test.block,
                 test.options_snapshot,
